@@ -83,6 +83,21 @@ function openscadEnv() {
   }
   return env;
 }
+
+// Manifold (OpenSCAD 2024+) is orders of magnitude faster than CGAL on
+// boolean-heavy models. Probed once at startup; older binaries lack the flag.
+let manifoldSupported = false;
+function detectManifold() {
+  return new Promise((resolve) => {
+    execFile(OPENSCAD_BIN, ['--help'], { timeout: 30000, env: openscadEnv() }, (err, stdout, stderr) => {
+      manifoldSupported = !err && /manifold/i.test(`${stdout}${stderr}`);
+      resolve(manifoldSupported);
+    });
+  });
+}
+function backendArgs() {
+  return manifoldSupported ? ['--backend=Manifold'] : [];
+}
 const STATE_FILE = 'clawscad.json';
 const ACTIVE_FILE = 'active.scad';
 const MAX_WINDOWS = 4;
@@ -472,7 +487,7 @@ function processRenderQueue(ctx) {
 
   ctxSend(ctx, 'render:start', { file: path.basename(scadPath) });
 
-  execFile(OPENSCAD_BIN, ['-o', outputPath, scadPath], { timeout: 120000, env: openscadEnv() }, (err, stdout, stderr) => {
+  execFile(OPENSCAD_BIN, ['-o', outputPath, scadPath, ...backendArgs()], { timeout: 120000, env: openscadEnv() }, (err, stdout, stderr) => {
     ctx.isRendering = false;
 
     const fault = classifyRenderFailure(err, outputPath);
@@ -971,8 +986,8 @@ ipcMain.handle('app:export', async (event, format) => {
   if (result.canceled) return null;
 
   const args = format === 'png'
-    ? ['--imgsize=1920,1080', '-o', result.filePath, scadPath]
-    : ['-o', result.filePath, scadPath];
+    ? ['--imgsize=1920,1080', '-o', result.filePath, scadPath, ...backendArgs()]
+    : ['-o', result.filePath, scadPath, ...backendArgs()];
 
   return new Promise((resolve) => {
     execFile(OPENSCAD_BIN, args, { timeout: 120000, env: openscadEnv() }, (err, stdout, stderr) => {
@@ -1071,6 +1086,7 @@ ipcMain.handle('app:window-count', () => windows.size);
 // ── App Lifecycle ───────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
+  await detectManifold();
   const cliArg = process.argv.slice(2).find((a) => !a.startsWith('-'));
   const wsDir = cliArg ? path.resolve(cliArg) : path.join(os.homedir(), 'clawscad-workspace');
   openWindow(wsDir);

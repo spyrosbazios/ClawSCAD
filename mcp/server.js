@@ -34,9 +34,22 @@ function openscadEnv() {
   return env;
 }
 
-function runOpenSCAD(args) {
+// Manifold (OpenSCAD 2024+) is far faster than CGAL on boolean-heavy models.
+// Probed once per server process; older binaries lack the flag.
+let backendArgs;
+function probeBackend() {
+  backendArgs ??= new Promise((resolve) => {
+    execFile(OPENSCAD, ['--help'], { timeout: TIMEOUT_MS, env: openscadEnv() }, (err, stdout, stderr) => {
+      resolve(!err && /manifold/i.test(`${stdout}${stderr}`) ? ['--backend=Manifold'] : []);
+    });
+  });
+  return backendArgs;
+}
+
+async function runOpenSCAD(args) {
+  const backend = await probeBackend();
   return new Promise((resolve) => {
-    execFile(OPENSCAD, args, { timeout: TIMEOUT_MS, killSignal: 'SIGKILL', env: openscadEnv(), maxBuffer: 16 * 1024 * 1024 },
+    execFile(OPENSCAD, [...args, ...backend], { timeout: TIMEOUT_MS, killSignal: 'SIGKILL', env: openscadEnv(), maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err && (err.killed || err.signal)) {
           resolve({ ok: false, timeout: true, output: `timeout: OpenSCAD did not finish within ${TIMEOUT_MS / 1000} s` });
