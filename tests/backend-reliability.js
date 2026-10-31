@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
+const { execFile } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 
 const appRoot = path.resolve(__dirname, '..');
@@ -22,7 +23,7 @@ function loadBackend(overrides = {}) {
     'node-pty': {},
     chokidar: { watch: () => watcher },
     child_process: {
-      execFile: (bin, args, options, callback) => renders.push({ bin, args, callback }),
+      execFile: (bin, args, options, callback) => renders.push({ bin, args, options, callback }),
       spawn: () => {
         const child = new EventEmitter();
         child.stdout = new EventEmitter();
@@ -211,4 +212,27 @@ test('a genuine model error retains the existing error report and Claude repair 
   assert.equal(backend.timers.length, 1);
   assert.equal(ctx.messages.find((m) => m.channel === 'render:error').data.fault, 'model');
   assert.equal(ctx.stlFallbackFor, null);
+});
+
+test('renders run with OPENSCADPATH pointing at the bundled libs', (t) => {
+  const backend = loadBackend();
+  const dir = workspace(t);
+  backend.processRenderQueue(renderContext(dir, ['model.scad']));
+  const { env } = backend.renders[0].options;
+  assert.equal(env.OPENSCADPATH.split(path.delimiter)[0], path.join(appRoot, 'vendors', 'libs'));
+});
+
+const libsDir = path.join(appRoot, 'vendors', 'libs');
+const openscadBin = process.env.OPENSCAD_BINARY;
+const canRenderBosl = fs.existsSync(path.join(libsDir, 'BOSL2', 'std.scad')) && Boolean(openscadBin) && fs.existsSync(openscadBin);
+test('BOSL2 renders through OPENSCADPATH', { skip: !canRenderBosl && 'needs vendors/libs/BOSL2 and OPENSCAD_BINARY' }, async (t) => {
+  const dir = workspace(t);
+  const scad = path.join(dir, 'bosl.scad');
+  const stl = path.join(dir, 'bosl.stl');
+  fs.writeFileSync(scad, 'include <BOSL2/std.scad>\ncuboid(10, rounding=2);\n');
+  const env = { ...process.env, OPENSCADPATH: libsDir, APPIMAGE_EXTRACT_AND_RUN: '1' };
+  await new Promise((resolve, reject) => {
+    execFile(openscadBin, ['-o', stl, scad], { env, timeout: 120000 }, (err, stdout, stderr) => (err ? reject(new Error(stderr || err.message)) : resolve()));
+  });
+  assert.ok(fs.statSync(stl).size > 0);
 });

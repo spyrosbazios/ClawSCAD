@@ -184,4 +184,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { flattenSingleDir };
+module.exports = { flattenSingleDir, download };

@@ -9,10 +9,12 @@ const { execFile, spawn } = require('child_process');
 // Resolve the OpenSCAD binary: prefer bundled copy, fall back to env / system.
 // In packaged builds, extraResources lands at process.resourcesPath.
 // In dev, look in the repo's vendors/ directory (populated by download-openscad.js).
+function resourcesBase() {
+  return app.isPackaged ? process.resourcesPath : path.join(__dirname, 'vendors');
+}
+
 function resolveOpenSCAD() {
-  const base = app.isPackaged
-    ? process.resourcesPath
-    : path.join(__dirname, 'vendors');
+  const base = resourcesBase();
   const candidates = {
     linux:  path.join(base, 'openscad-linux.AppImage'),
     darwin: path.join(base, 'OpenSCAD.app', 'Contents', 'MacOS', 'OpenSCAD'),
@@ -23,6 +25,16 @@ function resolveOpenSCAD() {
   return process.env.OPENSCAD_BINARY || 'openscad';
 }
 const OPENSCAD_BIN = resolveOpenSCAD();
+
+// Bundled OpenSCAD libraries (BOSL2), resolved like the binary and populated
+// by scripts/download-libs.js.
+const OPENSCAD_LIBS = path.join(resourcesBase(), 'libs');
+
+// OPENSCADPATH with the bundled libs first, keeping any user-configured paths.
+function openscadPath() {
+  const existing = process.env.OPENSCADPATH;
+  return existing ? OPENSCAD_LIBS + path.delimiter + existing : OPENSCAD_LIBS;
+}
 
 // Resolve the Claude Code CLI binary. Checks the standalone installer location
 // (~/.claude/local/claude), user/system PATH, and other common install paths.
@@ -60,10 +72,11 @@ const DEFAULT_SHELL = process.platform === 'win32'
 // On Linux, APPIMAGE_EXTRACT_AND_RUN=1 lets a bundled AppImage run inside
 // the Electron AppImage without needing nested FUSE mounts.
 function openscadEnv() {
+  const env = { ...process.env, OPENSCADPATH: openscadPath() };
   if (process.platform === 'linux' && OPENSCAD_BIN.endsWith('.AppImage')) {
-    return { ...process.env, APPIMAGE_EXTRACT_AND_RUN: '1' };
+    env.APPIMAGE_EXTRACT_AND_RUN = '1';
   }
-  return process.env;
+  return env;
 }
 const STATE_FILE = 'clawscad.json';
 const ACTIVE_FILE = 'active.scad';
@@ -323,6 +336,48 @@ color("#44cc88", 0.8) transparent_cover();
 Supported formats: named colors (CSS/SVG names like "Red", "SteelBlue", "Gold"), \`[r,g,b]\` floats 0-1, \`[r,g,b,a]\` with alpha, hex \`"#rrggbb"\`, \`"#rrggbbaa"\`.
 When the user asks to change colors, create a new file (never modify the old one) with the color changes.
 
+## Libraries
+BOSL2 is pre-installed (on \`OPENSCADPATH\`). **Prefer BOSL2 over hand-rolled \`hull()\`/\`minkowski()\` rounding** — it is faster to render and parametric by design.
+\`\`\`scad
+include <BOSL2/std.scad>       // shapes, attachments, rounding, sweeps
+include <BOSL2/screws.scad>    // screw_hole(), screw()
+include <BOSL2/threading.scad> // threaded_rod(), threaded_nut()
+include <BOSL2/gears.scad>     // spur_gear(), rack()
+\`\`\`
+- \`cuboid(size, rounding=, chamfer=, edges=, anchor=)\` — box with rounded/chamfered edges; \`size\` is a scalar or \`[x,y,z]\`
+- \`cyl(h, d=, rounding=, chamfer=, anchor=)\` — cylinder with rounded/chamfered ends (\`d1=\`/\`d2=\` for cones)
+- \`tube(h, od=, id=, wall=, anchor=)\` — hollow cylinder; give two of od/id/wall
+- \`prismoid(size1, size2, h, shift=, rounding=, chamfer=)\` — tapered box (\`size1\`/\`size2\` are bottom/top \`[x,y]\`)
+- \`screw_hole("M3", length=, head="socket", counterbore=, oversize=, teardrop=)\` — clearance/threaded holes by spec
+- \`threaded_rod(d, l, pitch, internal=)\` — ISO-style thread; \`internal=true\` for a nut cavity
+- \`spur_gear(mod=, teeth=, thickness=, shaft_diam=)\` — gears that mesh when \`mod\` matches
+- \`linear_sweep(region, height)\` — extrude a 2D path/region with BOSL2 anchors
+- \`offset_sweep(path, height, bottom=os_circle(r=), top=os_chamfer(height=))\` — extrude with rounded/chamfered top/bottom edges
+- **Attachments**: every BOSL2 shape has anchors (\`TOP\`, \`BOT\`, \`LEFT\`, \`FRONT+RIGHT\`, ...). \`anchor=BOT\` places the shape on the build plate; \`parent() attach(TOP) child();\` stacks a child on a face; \`position(TOP+LEFT) child();\` places without reorienting.
+- **Subtraction**: \`diff() cuboid(20) tag("remove") attach(TOP) cyl(h=5, d=6);\` — tagged children are subtracted from the parent, so holes stay attached to the feature they cut.
+
+## Parametric design (required)
+Every .scad file has this structure — parameter block, then modules, then **one** top-level call:
+\`\`\`scad
+// Wall-mount bracket with two M4 holes
+include <BOSL2/std.scad>
+/* [Dimensions] */
+width = 40;      // [20:1:100]
+height = 30;     // [10:1:80]
+wall = 2.4;      // [1.6:0.4:5]
+/* [Fit] */
+clearance = 0.25; // [0.1:0.05:0.5]
+/* [Hidden] */
+$fa = 2; $fs = 0.5;
+hole_d = 4 + 2 * clearance;  // derived, never a duplicated literal
+module bracket() { /* ... uses only the parameters above ... */ }
+bracket();
+\`\`\`
+- Use Customizer syntax: \`/* [Group] */\` comments, \`// [min:step:max]\` ranges, \`/* [Hidden] */\` for derived values and \`$fa\`/\`$fs\`.
+- Compute every derived value from parameters; never repeat a magic number. Changing one parameter must keep the part valid.
+- FDM defaults: wall ≥ 1.6 mm (4 perimeters at 0.4 nozzle); clearance 0.2–0.3 mm for sliding fits, 0.1 mm for press fits; minimum feature 0.8 mm; overhangs ≤ 45° or chamfer them (use \`teardrop=true\` for horizontal holes).
+- Smoothness via \`$fa = 2; $fs = 0.5;\` — never a giant global \`$fn\`.
+
 ## Workflow
 1. Read \`active.scad\` to understand the current model
 2. Create a new .scad file building on it (never modify the original)
@@ -425,6 +480,7 @@ function initWorkspace(ctx) {
     // Point the MCP server at the same bundled binary ClawSCAD uses
     env: { OPENSCAD_PATH: OPENSCAD_BIN },
   };
+  if (settings.mcpServers.openscad.env) settings.mcpServers.openscad.env.OPENSCADPATH = openscadPath();
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 }
 
@@ -735,27 +791,17 @@ function discoverSessions(ctx) {
 
 // ── Terminal ────────────────────────────────────────────────────────────
 
-function spawnPty(ctx, cmd, args = []) {
+// Claude and anything it runs (openscad CLI, MCP server) inherit OPENSCADPATH
+// so bundled libraries resolve exactly as they do in app renders.
+function spawnPty(ctx, cmd, args, channel) {
   const proc = pty.spawn(cmd, args, {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
     cwd: ctx.workspaceDir,
-    env: { ...process.env, COLORTERM: 'truecolor' },
+    env: { ...process.env, COLORTERM: 'truecolor', OPENSCADPATH: openscadPath() },
   });
-  proc.onData((data) => ctxSend(ctx, 'terminal:data', data));
-  return proc;
-}
-
-function spawnPty2(ctx, cmd, args = []) {
-  const proc = pty.spawn(cmd, args, {
-    name: 'xterm-256color',
-    cols: 80,
-    rows: 24,
-    cwd: ctx.workspaceDir,
-    env: { ...process.env, COLORTERM: 'truecolor' },
-  });
-  proc.onData((data) => ctxSend(ctx, 'terminal2:data', data));
+  proc.onData((data) => ctxSend(ctx, channel, data));
   return proc;
 }
 
@@ -765,9 +811,9 @@ function spawnPty2(ctx, cmd, args = []) {
 function spawnClaude(ctx, args = []) {
   const bin = resolveClaude();
   if (bin) {
-    try { return spawnPty(ctx, bin, args); } catch {}
+    try { return spawnPty(ctx, bin, args, 'terminal:data'); } catch {}
   }
-  const proc = spawnPty(ctx, DEFAULT_SHELL, []);
+  const proc = spawnPty(ctx, DEFAULT_SHELL, [], 'terminal:data');
   ctxSend(ctx, 'terminal:data',
     '\r\n\x1b[33mClaude Code CLI not found.\x1b[0m Install it from ' +
     'https://docs.claude.com/en/docs/claude-code/setup then restart the terminal.\r\n\r\n');
@@ -777,7 +823,7 @@ function spawnClaude(ctx, args = []) {
 function startTerminal(ctx) {
   ctx.ptyProcess = spawnClaude(ctx, []);
   ctx.ptyProcess.onExit(() => {
-    ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, []);
+    ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, [], 'terminal:data');
     ctx.ptyProcess.onExit(() => {});
   });
 }
@@ -786,7 +832,7 @@ function restartTerminal(ctx, args = []) {
   if (ctx.ptyProcess) try { ctx.ptyProcess.kill(); } catch {}
   ctx.ptyProcess = spawnClaude(ctx, args);
   ctx.ptyProcess.onExit(() => {
-    ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, []);
+    ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, [], 'terminal:data');
     ctx.ptyProcess.onExit(() => {});
   });
 }
@@ -842,9 +888,9 @@ ipcMain.handle('terminal2:spawn', (event) => {
   const ctx = getCtx(event);
   if (!ctx || ctx.ptyProcess2) return;
   try {
-    ctx.ptyProcess2 = spawnPty2(ctx, resolveClaude() || 'claude', []);
+    ctx.ptyProcess2 = spawnPty(ctx, resolveClaude() || 'claude', [], 'terminal2:data');
   } catch {
-    ctx.ptyProcess2 = spawnPty2(ctx, DEFAULT_SHELL, []);
+    ctx.ptyProcess2 = spawnPty(ctx, DEFAULT_SHELL, [], 'terminal2:data');
   }
   ctx.ptyProcess2.onExit(() => { ctx.ptyProcess2 = null; });
 });

@@ -6,7 +6,7 @@
   "scripts": {
     "postinstall": "electron-rebuild -f -w node-pty",
     "build:renderer": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && esbuild renderer.js --bundle --outfile=dist/renderer.js --format=esm --platform=browser --loader:.ttf=file",
-    "download-openscad": "node scripts/download-openscad.js",
+    "download-openscad": "node scripts/download-openscad.js && node scripts/download-libs.js",
     "start": "npm run build:renderer && electron . --no-sandbox",
     "dev": "npm run build:renderer && electron . --dev --no-sandbox",
     "test:backend": "node --test tests/backend-reliability.js",
@@ -64,7 +64,8 @@
       "icon": "icon.png",
       "category": "Graphics",
       "extraResources": [
-        { "from": "vendors/openscad-linux.AppImage", "to": "openscad-linux.AppImage" }
+        { "from": "vendors/openscad-linux.AppImage", "to": "openscad-linux.AppImage" },
+        { "from": "vendors/libs", "to": "libs" }
       ]
     },
     "win": {
@@ -73,7 +74,8 @@
       ],
       "icon": "icon.png",
       "extraResources": [
-        { "from": "vendors/openscad-win", "to": "openscad-win" }
+        { "from": "vendors/openscad-win", "to": "openscad-win" },
+        { "from": "vendors/libs", "to": "libs" }
       ]
     },
     "nsis": {
@@ -87,7 +89,8 @@
       "icon": "icon.png",
       "category": "public.app-category.graphics-design",
       "extraResources": [
-        { "from": "vendors/OpenSCAD.app", "to": "OpenSCAD.app" }
+        { "from": "vendors/OpenSCAD.app", "to": "OpenSCAD.app" },
+        { "from": "vendors/libs", "to": "libs" }
       ]
     },
     "dmg": {
