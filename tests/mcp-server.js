@@ -42,13 +42,21 @@ const json = (result) => JSON.parse(result.content[0].text);
 
 test('server lists the ClawSCAD tool set', async () => {
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ['check', 'export', 'measure', 'render_views', 'section']);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ['check', 'export', 'measure', 'params', 'render_views', 'section']);
 });
 
 test('a tool rejects calls without exactly one source', async () => {
   const result = await client.callTool({ name: 'check', arguments: {} });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /exactly one/);
+});
+
+test('params returns the Customizer block of a model', async () => {
+  fs.writeFileSync(path.join(cwd, 'knobs.scad'), '/* [Size] */\nwidth = 40; // [10:5:200]\nmode = "a"; // [a, b]\nmodule m() { inner = 1; }\n');
+  const out = json(await client.callTool({ name: 'params', arguments: { file: 'knobs.scad' } }));
+  assert.deepEqual(out.sections, ['Size']);
+  assert.deepEqual(out.parameters.map((p) => [p.name, p.control]), [['width', 'slider'], ['mode', 'select']]);
+  assert.equal(out.parameters[0].step, 5);
 });
 
 withOpenSCAD('check accepts valid code', { timeout: 150000 }, async () => {
