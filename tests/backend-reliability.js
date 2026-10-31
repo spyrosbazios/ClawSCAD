@@ -12,7 +12,7 @@ const source = fs.readFileSync(path.join(appRoot, 'main.js'), 'utf8');
 // Evaluate the actual main process code with Electron startup disabled and
 // controllable child processes. File writes and the render queue remain real.
 function loadBackend(overrides = {}) {
-  const renders = [], children = [], timers = [], logs = [];
+  const renders = [], timers = [], logs = [];
   const watcher = new EventEmitter();
   const mocks = {
     electron: {
@@ -23,28 +23,18 @@ function loadBackend(overrides = {}) {
     chokidar: { watch: () => watcher },
     child_process: {
       execFile: (bin, args, options, callback) => renders.push({ bin, args, callback }),
-      spawn: () => {
-        const child = new EventEmitter();
-        child.stdout = new EventEmitter();
-        child.stderr = new EventEmitter();
-        child.stdin = new EventEmitter();
-        child.stdin.write = () => {};
-        child.kill = () => {};
-        children.push(child);
-        return child;
-      },
     },
     ...overrides,
   };
   const context = vm.createContext({
-    require: (name) => mocks[name] || require(name),
+    require: (name) => mocks[name] || require(name.startsWith('./') ? path.join(appRoot, name) : name),
     __dirname: appRoot,
-    process: { env: {}, platform: process.platform, argv: [] },
+    process: { env: {}, platform: process.platform, argv: [], execPath: '/opt/ClawSCAD/clawscad' },
     console: { error: (...args) => logs.push(args), warn: (...args) => logs.push(args) },
     setTimeout: (callback, ms) => { timers.push({ callback, ms }); return timers.length; },
   });
-  vm.runInContext(source + '\n;globalThis.backend = { McpClient, writeClaudeMd, startFileWatcher, processRenderQueue };', context);
-  return { ...context.backend, renders, children, timers, logs, watcher };
+  vm.runInContext(source + '\n;globalThis.backend = { writeClaudeMd, initWorkspace, startFileWatcher, processRenderQueue };', context);
+  return { ...context.backend, renders, timers, logs, watcher };
 }
 
 function workspace(t) {
@@ -64,8 +54,11 @@ function renderContext(dir, files) {
   };
 }
 
+// An ASCII STL of one triangle spanning 10 x 20 x 0 mm.
+const MESH = 'solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 10 0 0\nvertex 0 20 0\nendloop\nendfacet\nendsolid t\n';
+
 function completeRender(request, err = null, stderr = '') {
-  if (!err) fs.writeFileSync(request.args[1], 'rendered mesh');
+  if (!err) fs.writeFileSync(request.args[1], MESH);
   request.callback(err, '', stderr);
 }
 
@@ -75,46 +68,6 @@ test('watcher errors are contained and later file events remain usable', () => {
   assert.doesNotThrow(() => backend.watcher.emit('error', new Error('ENOSPC')));
   assert.equal(backend.logs.length, 1);
   assert.doesNotThrow(() => backend.watcher.emit('change', 'notes.txt'));
-});
-
-for (const stream of ['child', 'stdin']) {
-  test(`MCP ${stream} errors reject pending calls and permit reconnecting`, async () => {
-    const backend = loadBackend();
-    const client = new backend.McpClient();
-    const starting = client.start();
-    const first = backend.children[0];
-    const pending = client._send('tools/list', {});
-    const rejected = assert.rejects(pending, /helper failed/);
-    assert.doesNotThrow(() => (stream === 'child' ? first : first.stdin).emit('error', new Error('helper failed')));
-    await starting;
-    await rejected;
-    assert.equal(client.proc, null);
-    assert.equal(client.ready, false);
-    assert.equal(client.pending.size, 0);
-
-    const restarting = client.start();
-    const second = backend.children[1];
-    first.stdout.emit('data', Buffer.from('stale incomplete output'));
-    assert.equal(client.buffer, '');
-    const initializeId = client.nextId - 1;
-    second.stdout.emit('data', Buffer.from(JSON.stringify({ id: initializeId, result: {} }) + '\n'));
-    await restarting;
-    first.emit('exit', 1);
-    assert.equal(client.proc, second);
-    assert.equal(client.ready, true);
-  });
-}
-
-test('stopping the MCP helper rejects requests without waiting for the timeout', async () => {
-  const backend = loadBackend();
-  const client = new backend.McpClient();
-  const starting = client.start();
-  const pending = client._send('tools/list', {});
-  const rejected = assert.rejects(pending, /stopped/);
-  client.stop();
-  await starting;
-  await rejected;
-  assert.equal(client.pending.size, 0);
 });
 
 test('CLAUDE.md preserves custom text while updating only its managed rules', (t) => {
@@ -162,7 +115,8 @@ test('a fresh workspace receives exactly one managed CLAUDE.md block', (t) => {
   backend.writeClaudeMd({ workspaceDir: dir }, [dir]);
   const text = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8');
   assert.equal(text.split('<!-- clawscad:rules:start -->').length - 1, 1);
-  assert.ok(text.includes('MCP Tools Available'));
+  assert.ok(text.includes('`render_views`'));
+  assert.ok(!text.includes('render_perspectives'));
 });
 
 test('an STL fallback is limited to its model and the next model uses 3MF', (t) => {
@@ -211,4 +165,45 @@ test('a genuine model error retains the existing error report and Claude repair 
   assert.equal(backend.timers.length, 1);
   assert.equal(ctx.messages.find((m) => m.channel === 'render:error').data.fault, 'model');
   assert.equal(ctx.stlFallbackFor, null);
+});
+
+test('the main process no longer carries its own MCP client', () => {
+  assert.ok(!/McpClient|mcpClient|openscad-mcp-server/.test(source));
+  const preload = fs.readFileSync(path.join(appRoot, 'preload.js'), 'utf8');
+  assert.ok(!/mcp/i.test(preload));
+});
+
+test('initWorkspace registers the bundled MCP server and keeps other settings', (t) => {
+  const dir = workspace(t);
+  const settingsFile = path.join(dir, '.claude', 'settings.json');
+  fs.mkdirSync(path.dirname(settingsFile));
+  fs.writeFileSync(settingsFile, JSON.stringify({ model: 'opus', mcpServers: { other: { command: 'x' }, openscad: { command: 'npx' } } }));
+  loadBackend().initWorkspace({ workspaceDir: dir });
+  const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  assert.equal(settings.model, 'opus');
+  assert.deepEqual(settings.mcpServers.other, { command: 'x' });
+  assert.deepEqual(settings.mcpServers.openscad, {
+    command: '/opt/ClawSCAD/clawscad',
+    args: [path.join(appRoot, 'dist', 'mcp-server.js')],
+    env: { ELECTRON_RUN_AS_NODE: '1', OPENSCAD_PATH: 'openscad' },
+  });
+});
+
+test('a successful render writes RENDER_STATUS.md and a failure removes it', (t) => {
+  const backend = loadBackend();
+  const dir = workspace(t);
+  const ctx = renderContext(dir, ['good.scad', 'bad.scad']);
+  ctx.ptyProcess = { write() {} };
+  backend.processRenderQueue(ctx);
+  // 3MF fails, so the bbox is read from the STL fallback.
+  completeRender(backend.renders[0], Object.assign(new Error('3MF failed'), { code: 1 }));
+  completeRender(backend.renders[1]);
+  const status = fs.readFileSync(path.join(dir, 'RENDER_STATUS.md'), 'utf8');
+  assert.match(status, /good\.scad/);
+  assert.match(status, /Size: 10 x 20 x 0 mm/);
+  const err = Object.assign(new Error('parser error'), { code: 1 });
+  completeRender(backend.renders[2], err, 'ERROR: syntax error');
+  completeRender(backend.renders[3], err, 'ERROR: syntax error');
+  assert.equal(fs.existsSync(path.join(dir, 'RENDER_STATUS.md')), false);
+  assert.ok(fs.existsSync(path.join(dir, 'RENDER_ERRORS.md')));
 });

@@ -46,10 +46,6 @@ contextBridge.exposeInMainWorld('api', {
   // Workspace
   getWorkspace: () => ipcRenderer.invoke('workspace:get'),
 
-  // MCP direct access (bypasses Claude, calls openscad-mcp-server directly)
-  mcpRenderPng: (scadCode, opts) => ipcRenderer.invoke('mcp:render-png', scadCode, opts),
-  mcpExportStl: (scadCode, filename) => ipcRenderer.invoke('mcp:export-stl', scadCode, filename),
-  mcpStatus: () => ipcRenderer.invoke('mcp:status'),
 
   // App menu actions
   newProjectWindow: () => ipcRenderer.invoke('app:new-project-window'),

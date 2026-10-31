@@ -49,7 +49,7 @@ jobs:
         run: npm run download-openscad
 
       - name: Build renderer
-        run: npm run build:renderer
+        run: npm run build
 
       - name: Build AppImage
         run: npx electron-builder --linux --publish never

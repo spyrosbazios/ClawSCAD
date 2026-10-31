@@ -53,7 +53,7 @@ jobs:
         run: node tests/download-openscad.js --vendor
 
       - name: Build renderer
-        run: npm run build:renderer
+        run: npm run build
 
       - name: Build Windows installer
         run: npx electron-builder --win --publish never

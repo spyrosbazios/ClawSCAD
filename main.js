@@ -4,7 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const pty = require('node-pty');
 const chokidar = require('chokidar');
-const { execFile, spawn } = require('child_process');
+const { execFile } = require('child_process');
+const { readMesh, measureMesh } = require('./mcp/geometry');
 
 // Resolve the OpenSCAD binary: prefer bundled copy, fall back to env / system.
 // In packaged builds, extraResources lands at process.resourcesPath.
@@ -23,6 +24,11 @@ function resolveOpenSCAD() {
   return process.env.OPENSCAD_BINARY || 'openscad';
 }
 const OPENSCAD_BIN = resolveOpenSCAD();
+
+// ClawSCAD's own MCP server, bundled by `npm run build` (mcp/server.js -> dist/mcp-server.js).
+const MCP_SERVER = app.isPackaged
+  ? path.join(process.resourcesPath, 'dist', 'mcp-server.js')
+  : path.join(__dirname, 'dist', 'mcp-server.js');
 
 // Resolve the Claude Code CLI binary. Checks the standalone installer location
 // (~/.claude/local/claude), user/system PATH, and other common install paths.
@@ -68,156 +74,6 @@ function openscadEnv() {
 const STATE_FILE = 'clawscad.json';
 const ACTIVE_FILE = 'active.scad';
 const MAX_WINDOWS = 4;
-
-// ── OpenSCAD MCP Client ─────────────────────────────────────────────────
-// Spawns openscad-mcp-server as a subprocess and calls its tools via JSON-RPC.
-// This gives ClawSCAD direct rendering/validation without relying on Claude's MCP.
-
-class McpClient {
-  constructor() {
-    this.proc = null;
-    this.nextId = 1;
-    this.pending = new Map(); // id -> { resolve, reject }
-    this.buffer = '';
-    this.ready = false;
-  }
-
-  async start() {
-    if (this.proc) return;
-
-    try {
-      this.proc = spawn('npx', ['-y', 'openscad-mcp-server'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: true,
-      });
-    } catch (err) {
-      console.error('Failed to start openscad-mcp-server:', err.message);
-      return;
-    }
-
-    const proc = this.proc;
-    const onError = (err) => {
-      console.error('openscad-mcp-server process error:', err.message);
-      this._disconnect(proc, err);
-    };
-    proc.on('error', onError);
-    proc.stdin.on('error', onError);
-
-    proc.stdout.on('data', (chunk) => {
-      if (this.proc !== proc) return;
-      this.buffer += chunk.toString();
-      this._processBuffer();
-    });
-
-    this.proc.stderr.on('data', (chunk) => {
-      // MCP server logs go to stderr — ignore unless debugging
-    });
-
-    proc.on('exit', () => this._disconnect(proc, new Error('MCP server exited')));
-
-    // MCP handshake
-    try {
-      await this._send('initialize', {
-        protocolVersion: '2024-11-05',
-        capabilities: {},
-        clientInfo: { name: 'ClawSCAD', version: '0.1.0' },
-      });
-      if (this.proc !== proc) return;
-      this._notify('notifications/initialized');
-      this.ready = true;
-    } catch (err) {
-      console.error('MCP handshake failed:', err.message);
-    }
-  }
-
-  stop() {
-    if (this.proc) {
-      const proc = this.proc;
-      try { proc.kill(); } catch {}
-      this._disconnect(proc, new Error('MCP server stopped'));
-    }
-  }
-
-  _disconnect(proc, err) {
-    // An old child's delayed exit must not clear a replacement connection.
-    if (this.proc !== proc) return;
-    this.proc = null;
-    this.ready = false;
-    this.buffer = '';
-    for (const [, p] of this.pending) p.reject(err);
-    this.pending.clear();
-  }
-
-  _processBuffer() {
-    // MCP uses newline-delimited JSON
-    let nl;
-    while ((nl = this.buffer.indexOf('\n')) !== -1) {
-      const line = this.buffer.slice(0, nl).trim();
-      this.buffer = this.buffer.slice(nl + 1);
-      if (!line) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.id !== undefined && this.pending.has(msg.id)) {
-          const p = this.pending.get(msg.id);
-          this.pending.delete(msg.id);
-          if (msg.error) {
-            p.reject(new Error(msg.error.message || 'MCP error'));
-          } else {
-            p.resolve(msg.result);
-          }
-        }
-      } catch {}
-    }
-  }
-
-  _send(method, params) {
-    return new Promise((resolve, reject) => {
-      if (!this.proc) return reject(new Error('MCP not running'));
-      const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
-      const msg = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
-      this.proc.stdin.write(msg);
-      // Timeout after 30s
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error('MCP timeout'));
-        }
-      }, 30000);
-    });
-  }
-
-  _notify(method, params) {
-    if (!this.proc) return;
-    const msg = JSON.stringify({ jsonrpc: '2.0', method, ...(params ? { params } : {}) }) + '\n';
-    this.proc.stdin.write(msg);
-  }
-
-  async callTool(name, args) {
-    if (!this.ready) await this.start();
-    if (!this.ready) throw new Error('MCP server not available');
-    const result = await this._send('tools/call', { name, arguments: args });
-    if (result && result.isError) {
-      throw new Error(result.content?.[0]?.text || 'Tool error');
-    }
-    return result;
-  }
-
-  async renderPng(scadCode, opts = {}) {
-    return this.callTool('render_scad_png', {
-      scadCode,
-      width: opts.width || 800,
-      height: opts.height || 600,
-      cameraPreset: opts.cameraPreset || 'isometric',
-    });
-  }
-
-  async exportStl(scadCode, filename) {
-    return this.callTool('export_scad_stl', { scadCode, filename });
-  }
-}
-
-const mcpClient = new McpClient();
 
 // ── Multi-Window State ──────────────────────────────────────────────────
 // Each BrowserWindow gets its own context: workspace, checkpoints, pty, watcher.
@@ -324,35 +180,26 @@ Supported formats: named colors (CSS/SVG names like "Red", "SteelBlue", "Gold"),
 When the user asks to change colors, create a new file (never modify the old one) with the color changes.
 
 ## Workflow
-1. Read \`active.scad\` to understand the current model
-2. Create a new .scad file building on it (never modify the original)
-3. **Use the OpenSCAD MCP server to validate your work** — this is critical:
-   - After creating a .scad file, use the MCP \`render\` tool to render it and visually inspect the result
-   - Use \`validate_scad\` to check for syntax errors before rendering
-   - Use \`analyze_model\` to check bounding box and dimensions match what the user asked for
-   - If the render shows problems, create a new fixed .scad file (still never modify the broken one)
-   - Use \`render_perspectives\` to check the model from multiple angles
-4. The app auto-detects new .scad files and adds them to the checkpoint history tree
-5. Users can click any checkpoint to go back and branch from it — every file is permanent
+1. Read \`active.scad\` to understand the current model.
+2. Write a NEW .scad file (never modify an existing one).
+3. Verify with the \`openscad\` MCP tools, in this order:
+   1. \`check\` — fix every ERROR and WARNING.
+   2. \`measure\` — compare bbox size (mm) with the requested dimensions; \`shells\` > 1 means disconnected parts.
+   3. \`render_views\` — look at the images; confirm shape, features and colors.
+4. If anything is wrong, write another NEW file with the fix and repeat step 3. Present only verified models.
 
-## MCP Tools Available
-You have access to the \`openscad\` MCP server with these tools — **use them proactively**:
-- \`render_single\` / \`render_perspectives\` — render the model to see what it looks like
-- \`validate_scad\` — check syntax before rendering (saves time)
-- \`analyze_model\` — get bounding box, dimensions, triangle count
-- \`export\` — export to STL, 3MF, AMF, etc.
-- \`check_openscad\` — verify OpenSCAD is installed and working
-- \`get_libraries\` — discover installed OpenSCAD libraries
-
-**Always render and visually verify your output.** Don't just write code and hope — use the MCP tools to see the result and iterate if needed.
+## MCP Tools (\`openscad\` server)
+Every tool takes \`file\` (workspace-relative path) OR \`code\` (inline OpenSCAD), never both.
+- \`check\` — fast parse/evaluate; returns \`ok\` and \`diagnostics\` [{level, message, line}].
+- \`measure\` — bbox {min,max,size}, volume (mm³), triangles, shells.
+- \`render_views\` — PNGs; \`views\` from front|back|left|right|top|bottom|iso (default iso,front,top,right), \`size\` px (default 512).
+- \`section\` — cut at \`axis\` x|y|z, \`offset\` mm; inspect walls, holes, cavities.
+- \`export\` — \`format\` stl|3mf|amf|off|png to \`out\`; only when the user asks.
 
 ## Auto-Iteration
-ClawSCAD automatically validates your .scad files when they are created. If a render fails:
-- Errors are written to \`RENDER_ERRORS.md\` in this workspace
-- You will receive a message asking you to fix the issue
-- **Read RENDER_ERRORS.md**, understand the problem, and create a NEW fixed .scad file
-- Keep iterating until the render succeeds — don't present broken models to the user
-- Only stop when you have a clean render with no errors`;
+ClawSCAD renders every new .scad file itself:
+- Success: \`RENDER_STATUS.md\` shows the file and its bounding box.
+- Failure: errors go to \`RENDER_ERRORS.md\` and you are asked to fix them. Read it and write a NEW fixed file; keep going until the render is clean.`;
 
 function updateAllClaudeMd() {
   // Filter out destroyed windows
@@ -419,11 +266,11 @@ function initWorkspace(ctx) {
     }
   } catch {}
   if (!settings.mcpServers) settings.mcpServers = {};
+  // Electron's own binary runs the bundled server as plain Node, so no system Node is needed.
   settings.mcpServers.openscad = {
-    command: 'npx',
-    args: ['-y', 'openscad-mcp-server'],
-    // Point the MCP server at the same bundled binary ClawSCAD uses
-    env: { OPENSCAD_PATH: OPENSCAD_BIN },
+    command: process.execPath,
+    args: [MCP_SERVER],
+    env: { ELECTRON_RUN_AS_NODE: '1', OPENSCAD_PATH: OPENSCAD_BIN },
   };
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 }
@@ -583,6 +430,7 @@ function processRenderQueue(ctx) {
         return;
       }
       ctx.stlFallbackFor = null;
+      clearRenderStatus(ctx);
       const errorText = stderr || (err && err.message) || 'OpenSCAD produced no model';
       const errors = parseOpenSCADErrors(errorText);
       ctxSend(ctx, 'render:error', {
@@ -601,6 +449,7 @@ function processRenderQueue(ctx) {
       sendModel(ctx, outputPath, format);
       ctxSend(ctx, 'render:complete', { file: path.basename(scadPath) });
       clearRenderErrors(ctx);
+      writeRenderStatus(ctx, path.basename(scadPath), outputPath);
     }
 
     processRenderQueue(ctx);
@@ -661,6 +510,30 @@ function writeRenderErrors(ctx, filename, errorText, errors) {
 function clearRenderErrors(ctx) {
   const errFile = path.join(ctx.workspaceDir, 'RENDER_ERRORS.md');
   try { if (fs.existsSync(errFile)) fs.unlinkSync(errFile); } catch {}
+}
+
+// The latest successful render, so Claude can confirm it without calling a tool.
+function writeRenderStatus(ctx, filename, outputPath) {
+  let geometry;
+  try {
+    const stats = measureMesh(readMesh(outputPath));
+    geometry = stats.empty
+      ? 'Empty model: no geometry was produced.'
+      : `- Size: ${stats.bbox.size.join(' x ')} mm\n` +
+        `- Min: [${stats.bbox.min.join(', ')}], Max: [${stats.bbox.max.join(', ')}]\n` +
+        `- Volume: ${stats.volume} mm³, shells: ${stats.shells}`;
+  } catch (err) {
+    geometry = `Bounding box unavailable: ${err.message}`;
+  }
+  fs.writeFileSync(
+    path.join(ctx.workspaceDir, 'RENDER_STATUS.md'),
+    `# Render OK: ${filename}\n\nOutput: \`${path.basename(outputPath)}\`\n\n${geometry}\n`
+  );
+}
+
+function clearRenderStatus(ctx) {
+  const statusFile = path.join(ctx.workspaceDir, 'RENDER_STATUS.md');
+  try { if (fs.existsSync(statusFile)) fs.unlinkSync(statusFile); } catch {}
 }
 
 function scadToStl(scadPath) {
@@ -958,28 +831,6 @@ ipcMain.handle('checkpoint:delete', (event, id) => {
   sendCheckpoints(ctx);
 });
 
-// ── MCP Direct Access ───────────────────────────────────────────────────
-
-ipcMain.handle('mcp:render-png', async (event, scadCode, opts) => {
-  try {
-    return await mcpClient.renderPng(scadCode, opts);
-  } catch (err) {
-    return { error: err.message };
-  }
-});
-
-ipcMain.handle('mcp:export-stl', async (event, scadCode, filename) => {
-  try {
-    return await mcpClient.exportStl(scadCode, filename);
-  } catch (err) {
-    return { error: err.message };
-  }
-});
-
-ipcMain.handle('mcp:status', async () => {
-  return { ready: mcpClient.ready };
-});
-
 ipcMain.handle('render:force', (event) => {
   const ctx = getCtx(event);
   if (!ctx) return;
@@ -1176,15 +1027,11 @@ ipcMain.handle('app:window-count', () => windows.size);
 // ── App Lifecycle ───────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
-  // Start the MCP server early so it's warm by the time we need it
-  mcpClient.start().catch(() => {});
-
   const cliArg = process.argv.slice(2).find((a) => !a.startsWith('-'));
   const wsDir = cliArg ? path.resolve(cliArg) : path.join(os.homedir(), 'clawscad-workspace');
   openWindow(wsDir);
 });
 
 app.on('window-all-closed', () => {
-  mcpClient.stop();
   app.quit();
 });

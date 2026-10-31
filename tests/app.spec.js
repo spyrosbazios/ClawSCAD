@@ -13,7 +13,7 @@ let page;
 
 test.beforeAll(async () => {
   const { execSync } = require('child_process');
-  execSync('npm run build:renderer', { cwd: APP_PATH, stdio: 'pipe' });
+  execSync('npm run build', { cwd: APP_PATH, stdio: 'pipe' });
   fs.mkdirSync(TEST_WORKSPACE, { recursive: true });
 });
 
