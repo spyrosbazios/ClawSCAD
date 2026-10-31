@@ -237,9 +237,10 @@ test('initWorkspace registers the bundled MCP server and hook and keeps other se
   fs.mkdirSync(path.dirname(settingsFile));
   const userHook = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user' }] };
   const staleHook = { matcher: 'Write', hooks: [{ type: 'command', command: 'node /old/clawscad-hook.js' }] };
+  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { other: { command: 'x' } } }));
   fs.writeFileSync(settingsFile, JSON.stringify({
     model: 'opus',
-    mcpServers: { other: { command: 'x' }, openscad: { command: 'npx' } },
+    mcpServers: { openscad: { command: 'npx' } },
     hooks: { PostToolUse: [userHook, staleHook], Stop: [userHook] },
   }));
   const backend = loadBackend();
@@ -260,8 +261,11 @@ test('initWorkspace registers the bundled MCP server and hook and keeps other se
     openscadPath: backend.OPENSCAD_BIN, openscadLibPath: path.join(appRoot, 'vendors', 'libs'),
   });
   assert.equal(settings.model, 'opus');
-  assert.deepEqual(settings.mcpServers.other, { command: 'x' });
-  assert.deepEqual(settings.mcpServers.openscad, {
+  assert.equal(settings.mcpServers, undefined);
+  assert.deepEqual(settings.enabledMcpjsonServers, ['openscad']);
+  const mcp = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+  assert.deepEqual(mcp.mcpServers.other, { command: 'x' });
+  assert.deepEqual(mcp.mcpServers.openscad, {
     command: '/opt/ClawSCAD/clawscad',
     args: [path.join(appRoot, 'dist', 'mcp-server.js')],
     env: { ELECTRON_RUN_AS_NODE: '1', OPENSCAD_PATH: backend.OPENSCAD_BIN, OPENSCADPATH: path.join(appRoot, 'vendors', 'libs') },

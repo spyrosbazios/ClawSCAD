@@ -333,26 +333,33 @@ function writeClaudeMd(ctx, allWorkspaces) {
   fs.writeFileSync(filePath, output);
 }
 
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf-8')); } catch { return {}; }
+}
+
 function initWorkspace(ctx) {
   fs.mkdirSync(ctx.workspaceDir, { recursive: true });
 
-  // MCP server config — merge into existing settings
   const claudeDir = path.join(ctx.workspaceDir, '.claude');
-  const settingsFile = path.join(claudeDir, 'settings.json');
   fs.mkdirSync(claudeDir, { recursive: true });
-  let settings = {};
-  try {
-    if (fs.existsSync(settingsFile)) {
-      settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
-    }
-  } catch {}
-  if (!settings.mcpServers) settings.mcpServers = {};
+
+  // Claude Code loads project MCP servers only from <workspace>/.mcp.json; merge into it.
+  const mcpFile = path.join(ctx.workspaceDir, '.mcp.json');
+  const mcp = readJson(mcpFile);
+  if (!mcp.mcpServers) mcp.mcpServers = {};
   // Electron's own binary runs the bundled server as plain Node, so no system Node is needed.
-  settings.mcpServers.openscad = {
+  mcp.mcpServers.openscad = {
     command: process.execPath,
     args: [MCP_SERVER],
     env: { ELECTRON_RUN_AS_NODE: '1', OPENSCAD_PATH: OPENSCAD_BIN, OPENSCADPATH: openscadPath() },
   };
+  fs.writeFileSync(mcpFile, JSON.stringify(mcp, null, 2));
+
+  // Settings hold the hook and the pre-approval of our .mcp.json server (no interactive prompt).
+  const settingsFile = path.join(claudeDir, 'settings.json');
+  const settings = readJson(settingsFile);
+  delete settings.mcpServers; // never read by Claude Code here; left over from older ClawSCAD builds
+  settings.enabledMcpjsonServers = [...new Set([...(settings.enabledMcpjsonServers || []), 'openscad'])];
 
   // Hooks have no env field: OpenSCAD settings travel in a config file, Electron-as-Node in the command.
   const hookConfig = path.join(claudeDir, HOOK_CONFIG);
