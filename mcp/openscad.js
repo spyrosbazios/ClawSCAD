@@ -17,10 +17,23 @@ function createOpenSCAD({ bin, cwd, libPath }) {
     return out;
   }
 
+  // Manifold (OpenSCAD 2024+) is far faster than CGAL on boolean-heavy models.
+  // Probed once per process; older binaries lack the flag.
+  let backendArgs;
+  function probeBackend() {
+    backendArgs ??= new Promise((resolve) => {
+      execFile(bin, ['--help'], { timeout: DEFAULT_TIMEOUT_MS, env: env() }, (err, stdout, stderr) => {
+        resolve(!err && /manifold/i.test(`${stdout}${stderr}`) ? ['--backend=Manifold'] : []);
+      });
+    });
+    return backendArgs;
+  }
+
   // Resolves { ok, timeout, missing, output }; `missing` marks an environment fault (binary unrunnable).
-  function run(args, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  async function run(args, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    const backend = await probeBackend();
     return new Promise((resolve) => {
-      execFile(bin, args, { cwd, timeout: timeoutMs, killSignal: 'SIGKILL', env: env(), maxBuffer: 16 * 1024 * 1024 },
+      execFile(bin, [...args, ...backend], { cwd, timeout: timeoutMs, killSignal: 'SIGKILL', env: env(), maxBuffer: 16 * 1024 * 1024 },
         (err, stdout, stderr) => {
           if (err && (err.killed || err.signal)) {
             resolve({ ok: false, timeout: true, missing: false, output: `timeout: OpenSCAD did not finish within ${timeoutMs / 1000} s` });

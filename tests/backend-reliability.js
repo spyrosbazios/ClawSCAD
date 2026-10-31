@@ -44,7 +44,7 @@ function loadBackend(overrides = {}) {
     console: { error: (...args) => logs.push(args), warn: (...args) => logs.push(args) },
     setTimeout: (callback, ms) => { timers.push({ callback, ms }); return timers.length; },
   });
-  vm.runInContext(source + '\n;globalThis.backend = { writeClaudeMd, initWorkspace, startFileWatcher, processRenderQueue, OPENSCAD_BIN };', context);
+  vm.runInContext(source + '\n;globalThis.backend = { writeClaudeMd, initWorkspace, startFileWatcher, processRenderQueue, detectManifold, OPENSCAD_BIN };', context);
   return { ...context.backend, renders, timers, logs, watcher };
 }
 
@@ -177,6 +177,24 @@ test('a genuine model error writes the error report without typing into Claude',
   assert.equal(ctx.messages.find((m) => m.channel === 'render:error').data.fault, 'model');
   assert.equal(ctx.stlFallbackFor, null);
 });
+
+for (const [help, err, expected] of [
+  ["  --backend arg  3D rendering backend to use: 'CGAL' or 'Manifold'", null, true],
+  ['  -o arg  output file', null, false],
+  ['', Object.assign(new Error('spawn openscad ENOENT'), { code: 'ENOENT' }), false],
+]) {
+  test(`renders ${expected ? 'use' : 'skip'} --backend=Manifold when the probe says ${expected ? 'yes' : 'no'}`, async (t) => {
+    const backend = loadBackend();
+    const dir = workspace(t);
+    const probing = backend.detectManifold();
+    const probe = backend.renders.shift();
+    assert.equal(probe.args.join(' '), '--help');
+    probe.callback(err, help, '');
+    assert.equal(await probing, expected);
+    backend.processRenderQueue(renderContext(dir, ['model.scad']));
+    assert.equal(backend.renders[0].args.includes('--backend=Manifold'), expected);
+  });
+}
 
 test('renders run with OPENSCADPATH pointing at the bundled libs', (t) => {
   const backend = loadBackend();

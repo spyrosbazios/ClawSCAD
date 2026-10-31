@@ -4,7 +4,6 @@
   "description": "AI-powered 3D CAD — OpenSCAD + Claude Code with checkpoint branching",
   "main": "main.js",
   "scripts": {
-    "postinstall": "electron-rebuild -f -w node-pty",
     "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && esbuild renderer.js --bundle --outfile=dist/renderer.js --format=esm --platform=browser --loader:.ttf=file && esbuild mcp/server.js --bundle --outfile=dist/mcp-server.js --format=cjs --platform=node && esbuild mcp/hook.js --bundle --outfile=dist/clawscad-hook.js --format=cjs --platform=node",
     "download-openscad": "node scripts/download-openscad.js && node scripts/download-libs.js",
     "start": "npm run build && electron . --no-sandbox",
@@ -12,7 +11,8 @@
     "test:backend": "node --test tests/backend-reliability.js",
     "test:mcp": "node --test tests/mcp-server.js",
     "test:hook": "npm run build && node --test tests/hook.js",
-    "test": "npm run test:backend && npm run test:mcp && npm run test:hook && node tests/download-openscad.js && npm run build && npx playwright test",
+    "test:params": "node --test tests/scad-params.js",
+    "test": "node scripts/check-native-deps.js && npm run test:backend && npm run test:mcp && npm run test:hook && npm run test:params && node tests/download-openscad.js && npm run build && npx playwright test",
     "test:headed": "npm run build && npx playwright test --headed",
     "pack": "npm run download-openscad && npm run build && electron-builder --dir",
     "dist": "npm run download-openscad && npm run build && electron-builder",
@@ -31,7 +31,6 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.0.4",
     "@playwright/test": "^1.58.2",
     "electron": "^42.2.0",
     "electron-builder": "^26.8.1",
@@ -43,6 +42,7 @@
   },
   "build": {
     "appId": "com.clawscad.app",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },

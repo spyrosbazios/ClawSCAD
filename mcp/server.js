@@ -7,6 +7,7 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
 const { createOpenSCAD, parseDiagnostics } = require('./openscad');
+const { parse: parseParams } = require('./scad-params');
 
 const openscad = createOpenSCAD({
   bin: process.env.OPENSCAD_PATH || process.env.OPENSCAD_BINARY || 'openscad',
@@ -181,6 +182,14 @@ server.registerTool('export', {
   const result = await openscad.run(['-o', out, `--export-format=${args.format}`, ...extra, scad]);
   if (!result.ok || !fs.existsSync(out)) return failure(result);
   return { content: [text({ path: out, bytes: fs.statSync(out).size })] };
+}));
+
+server.registerTool('params', {
+  description: 'List the model\'s Customizer parameters: top-level assignments before the first module/function, with /* [Group] */ sections and // [min:step:max] or // [a, b] annotations. Read-only; no render.',
+  inputSchema: sourceShape,
+}, handler(async (args, dir) => {
+  const scad = resolveSource(args, dir);
+  return { content: [text(parseParams(fs.readFileSync(scad, 'utf8')))] };
 }));
 
 server.connect(new StdioServerTransport()).catch((err) => {
