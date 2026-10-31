@@ -5,13 +5,14 @@
   "main": "main.js",
   "scripts": {
     "postinstall": "electron-rebuild -f -w node-pty",
-    "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && esbuild renderer.js --bundle --outfile=dist/renderer.js --format=esm --platform=browser --loader:.ttf=file && esbuild mcp/server.js --bundle --outfile=dist/mcp-server.js --format=cjs --platform=node",
+    "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && esbuild renderer.js --bundle --outfile=dist/renderer.js --format=esm --platform=browser --loader:.ttf=file && esbuild mcp/server.js --bundle --outfile=dist/mcp-server.js --format=cjs --platform=node && esbuild mcp/hook.js --bundle --outfile=dist/clawscad-hook.js --format=cjs --platform=node",
     "download-openscad": "node scripts/download-openscad.js && node scripts/download-libs.js",
     "start": "npm run build && electron . --no-sandbox",
     "dev": "npm run build && electron . --dev --no-sandbox",
     "test:backend": "node --test tests/backend-reliability.js",
     "test:mcp": "node --test tests/mcp-server.js",
-    "test": "npm run test:backend && npm run test:mcp && node tests/download-openscad.js && npm run build && npx playwright test",
+    "test:hook": "npm run build && node --test tests/hook.js",
+    "test": "npm run test:backend && npm run test:mcp && npm run test:hook && node tests/download-openscad.js && npm run build && npx playwright test",
     "test:headed": "npm run build && npx playwright test --headed",
     "pack": "npm run download-openscad && npm run build && electron-builder --dir",
     "dist": "npm run download-openscad && npm run build && electron-builder",
@@ -62,7 +63,9 @@
       {
         "from": "icon.png",
         "to": "icon.png"
-      }
+      },
+      { "from": "dist/mcp-server.js", "to": "dist/mcp-server.js" },
+      { "from": "dist/clawscad-hook.js", "to": "dist/clawscad-hook.js" }
     ],
     "linux": {
       "target": [

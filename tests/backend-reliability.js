@@ -163,17 +163,17 @@ for (const [code, properties, fault] of [
   });
 }
 
-test('a genuine model error retains the existing error report and Claude repair behavior', (t) => {
+test('a genuine model error writes the error report without typing into Claude', (t) => {
   const backend = loadBackend();
   const dir = workspace(t);
   const ctx = renderContext(dir, ['broken.scad']);
-  ctx.ptyProcess = { write() {} };
+  ctx.ptyProcess = { write: () => assert.fail('unexpected Claude input') };
   backend.processRenderQueue(ctx);
   const err = Object.assign(new Error('parser error'), { code: 1 });
   completeRender(backend.renders[0], err, 'ERROR: syntax error');
   completeRender(backend.renders[1], err, 'ERROR: syntax error');
   assert.match(fs.readFileSync(path.join(dir, 'RENDER_ERRORS.md'), 'utf8'), /syntax error/);
-  assert.equal(backend.timers.length, 1);
+  assert.equal(backend.timers.length, 0);
   assert.equal(ctx.messages.find((m) => m.channel === 'render:error').data.fault, 'model');
   assert.equal(ctx.stlFallbackFor, null);
 });
@@ -207,14 +207,40 @@ test('the main process no longer carries its own MCP client', () => {
   assert.ok(!/mcp/i.test(preload));
 });
 
-test('initWorkspace registers the bundled MCP server and keeps other settings', (t) => {
+test('writeRenderErrors no longer types into the Claude terminal', () => {
+  const body = source.slice(source.indexOf('function writeRenderErrors'), source.indexOf('function clearRenderErrors'));
+  assert.ok(body.length > 0);
+  assert.ok(!/ptyProcess|setTimeout/.test(body));
+});
+
+test('initWorkspace registers the bundled MCP server and hook and keeps other settings', (t) => {
   const dir = workspace(t);
   const settingsFile = path.join(dir, '.claude', 'settings.json');
   fs.mkdirSync(path.dirname(settingsFile));
-  fs.writeFileSync(settingsFile, JSON.stringify({ model: 'opus', mcpServers: { other: { command: 'x' }, openscad: { command: 'npx' } } }));
+  const userHook = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user' }] };
+  const staleHook = { matcher: 'Write', hooks: [{ type: 'command', command: 'node /old/clawscad-hook.js' }] };
+  fs.writeFileSync(settingsFile, JSON.stringify({
+    model: 'opus',
+    mcpServers: { other: { command: 'x' }, openscad: { command: 'npx' } },
+    hooks: { PostToolUse: [userHook, staleHook], Stop: [userHook] },
+  }));
   const backend = loadBackend();
   backend.initWorkspace({ workspaceDir: dir });
+  backend.initWorkspace({ workspaceDir: dir });
   const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  const hookConfig = path.join(dir, '.claude', 'clawscad-hook.json');
+  assert.deepEqual(settings.hooks.Stop, [userHook]);
+  assert.deepEqual(settings.hooks.PostToolUse, [userHook, {
+    matcher: 'Write|Edit|MultiEdit',
+    hooks: [{
+      type: 'command',
+      command: `ELECTRON_RUN_AS_NODE=1 '/opt/ClawSCAD/clawscad' '${path.join(appRoot, 'dist', 'clawscad-hook.js')}' '${hookConfig}'`,
+      timeout: 90,
+    }],
+  }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(hookConfig, 'utf8')), {
+    openscadPath: backend.OPENSCAD_BIN, openscadLibPath: path.join(appRoot, 'vendors', 'libs'),
+  });
   assert.equal(settings.model, 'opus');
   assert.deepEqual(settings.mcpServers.other, { command: 'x' });
   assert.deepEqual(settings.mcpServers.openscad, {

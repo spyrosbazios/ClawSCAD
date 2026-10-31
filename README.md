@@ -52,7 +52,7 @@ Every iteration is saved as an immutable checkpoint. You can click any checkpoin
 - Embedded terminal running Claude Code
 - OpenSCAD MCP server auto-configured for every workspace
 - CLAUDE.md with mandatory rules: never overwrite files, use colors, validate with MCP tools
-- Auto-iteration: when a render fails, ClawSCAD writes errors to RENDER_ERRORS.md and nudges Claude to fix them
+- Auto-iteration: a Claude Code PostToolUse hook checks and measures every .scad Claude writes; errors block the turn until Claude writes a fixed file, successes report bbox/volume back to Claude
 - Session management: browse, resume, or start new Claude sessions
 - Dual terminal support (up to 2 Claude instances)
 - Multi-window support (up to 4 projects, Claude sees all workspaces)

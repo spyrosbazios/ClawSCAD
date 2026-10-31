@@ -40,6 +40,16 @@ function openscadPath() {
 const MCP_SERVER = app.isPackaged
   ? path.join(process.resourcesPath, 'dist', 'mcp-server.js')
   : path.join(__dirname, 'dist', 'mcp-server.js');
+// The PostToolUse hook that checks and measures every .scad Claude writes (mcp/hook.js -> dist/clawscad-hook.js).
+const HOOK_SCRIPT = app.isPackaged
+  ? path.join(process.resourcesPath, 'dist', 'clawscad-hook.js')
+  : path.join(__dirname, 'dist', 'clawscad-hook.js');
+const HOOK_CONFIG = 'clawscad-hook.json';
+
+// POSIX single-quoting; Claude Code runs hook commands through bash (Git Bash on Windows).
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
 
 // Resolve the Claude Code CLI binary. Checks the standalone installer location
 // (~/.claude/local/claude), user/system PATH, and other common install paths.
@@ -251,9 +261,10 @@ Every tool takes \`file\` (workspace-relative path) OR \`code\` (inline OpenSCAD
 - \`export\` — \`format\` stl|3mf|amf|off|png to \`out\`; only when the user asks.
 
 ## Auto-Iteration
-ClawSCAD renders every new .scad file itself:
-- Success: \`RENDER_STATUS.md\` shows the file and its bounding box.
-- Failure: errors go to \`RENDER_ERRORS.md\` and you are asked to fix them. Read it and write a NEW fixed file; keep going until the render is clean.`;
+Every time you write or edit a .scad file, a hook checks and measures it and reports back in that tool result:
+- OK: bbox size, volume and shell count (plus any warnings). Compare them against the requested dimensions.
+- Blocked: the render errors are listed. Fix them in a NEW .scad file, never by editing the broken one; repeat until clean.
+The app's own render also leaves \`RENDER_STATUS.md\` / \`RENDER_ERRORS.md\` in the workspace.`;
 
 function updateAllClaudeMd() {
   // Filter out destroyed windows
@@ -326,6 +337,21 @@ function initWorkspace(ctx) {
     args: [MCP_SERVER],
     env: { ELECTRON_RUN_AS_NODE: '1', OPENSCAD_PATH: OPENSCAD_BIN, OPENSCADPATH: openscadPath() },
   };
+
+  // Hooks have no env field: OpenSCAD settings travel in a config file, Electron-as-Node in the command.
+  const hookConfig = path.join(claudeDir, HOOK_CONFIG);
+  fs.writeFileSync(hookConfig, JSON.stringify({ openscadPath: OPENSCAD_BIN, openscadLibPath: openscadPath() }, null, 2));
+  const ours = {
+    matcher: 'Write|Edit|MultiEdit',
+    hooks: [{
+      type: 'command',
+      command: `ELECTRON_RUN_AS_NODE=1 ${[process.execPath, HOOK_SCRIPT, hookConfig].map(shellQuote).join(' ')}`,
+      timeout: 90,
+    }],
+  };
+  if (!settings.hooks) settings.hooks = {};
+  const isOurs = (entry) => (entry.hooks || []).some((h) => typeof h.command === 'string' && h.command.includes('clawscad-hook'));
+  settings.hooks.PostToolUse = [...(settings.hooks.PostToolUse || []).filter((entry) => !isOurs(entry)), ours];
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 }
 
@@ -547,18 +573,6 @@ function writeRenderErrors(ctx, filename, errorText, errors) {
       `## Errors\n${errorLines || errorText}\n\n` +
       `## Raw Output\n\`\`\`\n${errorText.substring(0, 2000)}\n\`\`\`\n`
   );
-
-  // Send a nudge to Claude's terminal — a visible prompt that there are errors to fix
-  if (ctx.ptyProcess) {
-    // Only nudge if Claude seems idle (don't interrupt mid-generation)
-    // Write to pty so it appears in the conversation as user input
-    const nudge =
-      `The render of ${filename} failed. Read RENDER_ERRORS.md for details and create a fixed version.\n`;
-    // Small delay to avoid interrupting Claude mid-output
-    setTimeout(() => {
-      if (ctx.ptyProcess) ctx.ptyProcess.write(nudge);
-    }, 2000);
-  }
 }
 
 function clearRenderErrors(ctx) {

@@ -3,14 +3,16 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFile } = require('child_process');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
-const { readMesh, measureMesh } = require('./geometry');
+const { createOpenSCAD, parseDiagnostics } = require('./openscad');
 
-const OPENSCAD = process.env.OPENSCAD_PATH || process.env.OPENSCAD_BINARY || 'openscad';
-const TIMEOUT_MS = 120000;
+const openscad = createOpenSCAD({
+  bin: process.env.OPENSCAD_PATH || process.env.OPENSCAD_BINARY || 'openscad',
+  cwd: process.cwd(),
+  libPath: process.env.OPENSCADPATH,
+});
 
 const VIEWS = {
   iso: { rot: [55, 0, 25], projection: 'perspective' },
@@ -25,42 +27,6 @@ const VIEWS = {
 const SECTION_VIEW = { x: 'right', y: 'back', z: 'top' };
 
 class ToolFailure extends Error {}
-
-function openscadEnv() {
-  const env = { ...process.env };
-  if (OPENSCAD.endsWith('.AppImage')) env.APPIMAGE_EXTRACT_AND_RUN = '1';
-  // Inline code is evaluated from a temp file; keep workspace-relative include/use working.
-  env.OPENSCADPATH = [process.cwd(), process.env.OPENSCADPATH].filter(Boolean).join(path.delimiter);
-  return env;
-}
-
-function runOpenSCAD(args) {
-  return new Promise((resolve) => {
-    execFile(OPENSCAD, args, { timeout: TIMEOUT_MS, killSignal: 'SIGKILL', env: openscadEnv(), maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err && (err.killed || err.signal)) {
-          resolve({ ok: false, timeout: true, output: `timeout: OpenSCAD did not finish within ${TIMEOUT_MS / 1000} s` });
-        } else if (err && typeof err.code === 'string') {
-          resolve({ ok: false, timeout: false, output: `cannot run OpenSCAD (${OPENSCAD}): ${err.code}` });
-        } else {
-          resolve({ ok: !err, timeout: false, output: `${stdout}${stderr}` });
-        }
-      });
-  });
-}
-
-// Matches e.g. `ERROR: Parser error: syntax error in file bad.scad, line 3`
-// and `WARNING: Ignoring unknown variable "q" in file a.scad, line 2`.
-function parseDiagnostics(output) {
-  const out = [];
-  const re = /^(ERROR|WARNING|TRACE):\s*(.*)$/gm;
-  let m;
-  while ((m = re.exec(output)) !== null) {
-    const line = /line\s+(\d+)/.exec(m[2]);
-    out.push({ level: m[1].toLowerCase(), message: m[2].trim(), line: line ? Number(line[1]) : null });
-  }
-  return out;
-}
 
 const sourceShape = {
   file: z.string().optional().describe('.scad file path, relative to the workspace'),
@@ -101,7 +67,7 @@ function cameraArgs(view, size) {
 
 async function renderPng(scadPath, view, size, dir, extra = []) {
   const png = path.join(dir, `${view}-${Math.random().toString(36).slice(2)}.png`);
-  const result = await runOpenSCAD(['-o', png, ...extra, ...cameraArgs(view, size), scadPath]);
+  const result = await openscad.run(['-o', png, ...extra, ...cameraArgs(view, size), scadPath]);
   if (!result.ok) return { result };
   return { result, data: fs.readFileSync(png).toString('base64') };
 }
@@ -134,24 +100,14 @@ function handler(fn) {
   };
 }
 
-async function measureSource(scadPath, dir) {
-  const stl = path.join(dir, 'measure.stl');
-  const result = await runOpenSCAD(['-o', stl, scadPath]);
-  if (!result.ok) return { result };
-  return { result, stats: measureMesh(readMesh(stl)) };
-}
-
 const server = new McpServer({ name: 'clawscad-openscad', version: '1.0.0' });
 
 server.registerTool('check', {
   description: 'Fast syntax/evaluation check without building geometry. Run first after writing a .scad file; returns ERROR/WARNING lines.',
   inputSchema: sourceShape,
 }, handler(async (args, dir) => {
-  const scad = resolveSource(args, dir);
-  const result = await runOpenSCAD(['-o', path.join(dir, 'out.csg'), scad]);
+  const { result, ok, diagnostics } = await openscad.check(resolveSource(args, dir), dir);
   if (result.timeout) return failure(result);
-  const diagnostics = parseDiagnostics(result.output).filter((d) => d.level !== 'trace');
-  const ok = result.ok && !diagnostics.some((d) => d.level === 'error');
   return { content: [text({ ok, diagnostics })] };
 }));
 
@@ -159,9 +115,8 @@ server.registerTool('measure', {
   description: 'Build the mesh and report bounding box (min/max/size, mm), volume (mm^3), triangle count and disconnected shells. Use to verify dimensions against the request.',
   inputSchema: sourceShape,
 }, handler(async (args, dir) => {
-  const { result, stats } = await measureSource(resolveSource(args, dir), dir);
+  const { result, stats, warnings } = await openscad.measure(resolveSource(args, dir), dir);
   if (!stats) return failure(result);
-  const warnings = parseDiagnostics(result.output).filter((d) => d.level === 'warning');
   return { content: [text({ ...stats, units: 'mm', warnings })] };
 }));
 
@@ -223,7 +178,7 @@ server.registerTool('export', {
   const out = path.resolve(process.cwd(), args.out);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const extra = args.format === 'png' ? cameraArgs('iso', 1024) : [];
-  const result = await runOpenSCAD(['-o', out, `--export-format=${args.format}`, ...extra, scad]);
+  const result = await openscad.run(['-o', out, `--export-format=${args.format}`, ...extra, scad]);
   if (!result.ok || !fs.existsSync(out)) return failure(result);
   return { content: [text({ path: out, bytes: fs.statSync(out).size })] };
 }));
